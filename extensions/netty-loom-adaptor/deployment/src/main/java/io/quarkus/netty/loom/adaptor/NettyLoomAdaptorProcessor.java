@@ -144,7 +144,7 @@ public class NettyLoomAdaptorProcessor {
             System.out.println("didn't find it");
             return;
         }
-        var klass = "io/netty/buffer/PooledByteBufAllocator.class";
+        var klass = "io/netty/buffer/PooledByteBufAllocator";
 
         producer.produce(new BytecodeTransformerBuildItem(klass, new BiFunction<String, ClassVisitor, ClassVisitor>() {
             @Override
