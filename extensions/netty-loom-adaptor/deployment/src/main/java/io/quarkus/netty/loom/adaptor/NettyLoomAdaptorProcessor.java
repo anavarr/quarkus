@@ -149,7 +149,14 @@ public class NettyLoomAdaptorProcessor {
             public ClassVisitor apply(String cls, ClassVisitor classVisitor) {
                 return new NettyCurrentAdaptor(ASM9, classVisitor);
             }
+        }));
 
+
+        producer.produce(new BytecodeTransformerBuildItem(klass, new BiFunction<String, ClassVisitor, ClassVisitor>() {
+            @Override
+            public ClassVisitor apply(String cls, ClassVisitor classVisitor) {
+                return new NettyCurrentAdaptorPrinter(ASM9, classVisitor);
+            }
         }));
     }
 
@@ -157,6 +164,7 @@ public class NettyLoomAdaptorProcessor {
         public NettyCurrentAdaptor(int version, ClassVisitor cv) {
             super(version, cv);
             LOG.info("Adapting Netty for Loom...");
+            LOG.info("hehehe good hello");
         }
 
         @Override
