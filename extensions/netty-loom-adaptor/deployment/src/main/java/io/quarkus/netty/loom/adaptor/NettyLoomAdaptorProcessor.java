@@ -45,6 +45,7 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 
+import io.netty.buffer.PooledByteBufAllocator;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.Consume;
@@ -140,9 +141,10 @@ public class NettyLoomAdaptorProcessor {
         var runOnVirtualThreadAnnotations = combinedIndexBuildItem.getComputingIndex()
                 .getAnnotations(DotName.createSimple(RunOnVirtualThread.class.getName())).size();
         if (runOnVirtualThreadAnnotations == 0) {
+            System.out.println("didn't find it");
             return;
         }
-        var klass = "io.netty.buffer.PooledByteBufAllocator";
+        var klass = "io/netty/buffer/PooledByteBufAllocator.class";
 
         producer.produce(new BytecodeTransformerBuildItem(klass, new BiFunction<String, ClassVisitor, ClassVisitor>() {
             @Override
@@ -151,13 +153,17 @@ public class NettyLoomAdaptorProcessor {
             }
         }));
 
+        //        var tccl = Thread.currentThread().getContextClassLoader();
+        //        var res = tccl.getResourceAsStream(klass);
+        //        ClassReader cr = new ClassReader(res);
+        //        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        //        NettyCurrentAdaptor nca = new NettyCurrentAdaptorHandles(ASM9, cw);
+        //        cr.accept(nca, ClassReader.SKIP_DEBUG);
+        //        byte[] data = cw.toByteArray();
+        //        cr = new ClassReader(data);
+        //        TraceClassVisitor cv = new TraceClassVisitor(new PrintWriter(System.out));
+        //        cr.accept(cv, ClassReader.SKIP_DEBUG);
 
-        producer.produce(new BytecodeTransformerBuildItem(klass, new BiFunction<String, ClassVisitor, ClassVisitor>() {
-            @Override
-            public ClassVisitor apply(String cls, ClassVisitor classVisitor) {
-                return new NettyCurrentAdaptorPrinter(ASM9, classVisitor);
-            }
-        }));
     }
 
     private class NettyCurrentAdaptor extends ClassVisitor {
@@ -572,8 +578,9 @@ public class NettyLoomAdaptorProcessor {
 
     }
 
-    private class NettyCurrentAdaptorPrinter extends NettyCurrentAdaptor {
-        public NettyCurrentAdaptorPrinter(int version, ClassVisitor cv) {
+    private class NettyCurrentAdaptorHandles extends NettyCurrentAdaptor {
+
+        public NettyCurrentAdaptorHandles(int version, ClassVisitor cv) {
             super(version, cv);
         }
 
@@ -585,15 +592,308 @@ public class NettyLoomAdaptorProcessor {
                 final String signature,
                 final String[] exceptions) {
             if (cv != null) {
+                MethodVisitor mv = cv.visitMethod(access, name, descriptor, signature, exceptions);
+                if (name.equals("<clinit>")) {
+                    // we need to augment the <clinit> method to assigned the different static fields we added to the
+                    // {@link io.netty.buffer.PooledByteBufAllocator PooledByteBufAllocator} class
+                    mv = new MethodVisitor(Gizmo.ASM_API_VERSION, mv) {
+                        @Override
+                        public void visitInsn(int opcode) {
+                            if (opcode == RETURN) {
+                                Label L0 = new Label();
+                                Label L1 = new Label();
+                                Label L2 = new Label();
+
+                                Label LthreadCaches = new Label();
+                                Label lcanUseVirtual = new Label();
+
+                                // set canUseVirtual to true
+                                mv.visitLabel(lcanUseVirtual);
+                                mv.visitInsn(ICONST_1);
+                                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                                        "(Z)Ljava/lang/Boolean;", false);
+                                mv.visitFieldInsn(PUTSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                                        "canUseVirtual", "Ljava/lang/Boolean;");
+
+                                // fetch the currentCarrierThread method and put it inside the getCurrentCarrierMethod field
+                                // to avoid having to fetch it every time we need to invoke it
+                                mv.visitLabel(L0);
+                                mv.visitLdcInsn("java.lang.Thread");
+                                mv.visitMethodInsn(INVOKESTATIC, "java/lang/invoke/MethodHandles", "lookup",
+                                        "()Ljava/lang/invoke/MethodHandles$Lookup", false);
+                                mv.visitMethodInsn(INVOKESTATIC, "java/lang/MethodHandles", "privateLookupIn",
+                                        "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;",
+                                        false);
+                                mv.visitVarInsn(ASTORE, 0);
+                                mv.visitVarInsn(ALOAD, 0);
+                                mv.visitLdcInsn("java.lang.Thread");
+                                mv.visitLdcInsn("currentCarrierThread");
+                                mv.visitLdcInsn("java.lang.Thread");
+                                mv.visitMethodInsn(INVOKESTATIC, "java/lang/invoke/MethodType", "methodType",
+                                        "(Ljava/lang/Class;)Ljava/lang/invoke/MethodType;", false);
+                                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/invoke/MethodHandles$Lookup", "findStatic",
+                                        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;",
+                                        false);
+                                mv.visitFieldInsn(PUTSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                                        "getCurrentCarrierHandle", "Ljava/lang/invoke/MethodHandle;");
+
+                                // fetch the isVirtual method and put it inside the isVirtualHandle field
+                                // to avoid having to fetch it every time we need to invoke it
+                                mv.visitVarInsn(ALOAD, 0);
+                                mv.visitLdcInsn("java.lang.Thread");
+                                mv.visitLdcInsn("isVirtual");
+                                mv.visitFieldInsn(GETSTATIC, "java/lang/Boolean", "TYPE", "Ljava/lang/Class;");
+                                mv.visitMethodInsn(INVOKESTATIC, "java/lang/invoke/MethodType", "methodType",
+                                        "(Ljava/lang/Class;)Ljava/lang/invoke/MethodType;", false);
+                                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/invoke/MethodHandles$Lookup", "findVirtual",
+                                        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;",
+                                        false);
+                                mv.visitFieldInsn(PUTSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                                        "isVirtualHandle", "Ljava/lang/invoke/MethodHandle;");
+
+                                mv.visitLabel(L1);
+                                mv.visitJumpInsn(GOTO, LthreadCaches);
+
+                                // catch block of reflective calls to fetch isVirtual and currentCarrierThread.
+                                // we set the canUseVirtual field to false if we enter the catch block:
+                                // if these methods can't be found the jdk is not quarkus-loom compliant
+                                mv.visitLabel(L2);
+                                mv.visitVarInsn(ASTORE, 0);
+                                mv.visitInsn(ICONST_0);
+                                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                                        "(Z)Ljava/lang/Boolean;", false);
+                                mv.visitFieldInsn(PUTSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                                        "canUseVirtual", "Ljava/lang/Boolean;");
+
+                                // create the static concurrentHashMap that will be populated
+                                mv.visitLabel(LthreadCaches);
+                                mv.visitTypeInsn(NEW, "java/util/concurrent/ConcurrentHashMap");
+                                mv.visitInsn(DUP);
+                                mv.visitMethodInsn(INVOKESPECIAL, "java/util/concurrent/ConcurrentHashMap",
+                                        "<init>", "()V", false);
+                                mv.visitFieldInsn(PUTSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                                        "threadCaches", "Ljava/util/concurrent/ConcurrentHashMap;");
+
+                                mv.visitTryCatchBlock(L0, L1, L2, "java/lang/Throwable");
+                            }
+                            super.visitInsn(opcode);
+                        }
+
+                    };
+                    mv.visitMaxs(3, 3);
+                    return mv;
+                }
                 if (name.equals("newDirectBuffer")) {
-                    MethodVisitor mv = cv.visitMethod(access, name, descriptor, signature, exceptions);
+                    // this is the actual method we want to modify
                     mv = new CurrentThreadMethodAdaptor(Gizmo.ASM_API_VERSION, mv);
                     mv.visitMaxs(4, 4);
                     return mv;
                 }
-                return null;
+                return mv;
             }
             return null;
+        }
+
+        /**
+         * this method contains logic that was previously in
+         * {@link io.netty.buffer.PooledByteBufAllocator#newDirectBuffer(int, int)} newDirectBuffer(int, int)
+         * it was a method of {@link io.netty.buffer.PooledByteBufAllocator.PoolThreadLocalCache PoolThreadLocalCache},
+         * we need to reimplement it outside of this subclass that we don't use anymore
+         */
+        public void createCacheMethod() {
+            Label L0 = new Label();
+            Label L1 = new Label();
+            Label L2 = new Label();
+            Label LError = new Label();
+            Label LStart = new Label();
+            Label LEnd = new Label();
+            Label testHashMap = new Label();
+            Label LKeyIn = new Label();
+            Label LKeyOut = new Label();
+            Label L14 = new Label();
+            //needs to be private
+            var mv = cv.visitMethod(ACC_PRIVATE, "createCache", "(II)Lio/netty/buffer/PoolThreadCache;", null, null);
+            mv.visitLabel(LStart);
+            //set currentCarrier to the currentThread
+            mv.visitMethodInsn(INVOKESTATIC, "java/lang/Thread", "currentThread",
+                    "()Ljava/lang/Thread;", false);
+            mv.visitTypeInsn(CHECKCAST, "java/lang/Thread");
+            mv.visitVarInsn(ASTORE, 5);
+
+            //we try to access the currentCarrierThread method
+            mv.visitLabel(L0);
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                    "getCurrentCarrierHandle", "Ljava/lang/invoke/MethodHandle;");
+            //we store the result in method
+            mv.visitTypeInsn(CHECKCAST, "java/lang/reflect/Method");
+            mv.visitMethodInsn(INVOKESTATIC, "java/lang/Thread", "currentThread",
+                    "()Ljava/lang/Thread;", false);
+            mv.visitInsn(ICONST_0);
+            mv.visitTypeInsn(ANEWARRAY, "java/lang/Object");
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/reflect/Method", "invokeExact",
+                    "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", false);
+            mv.visitTypeInsn(CHECKCAST, "java/lang/Thread");
+            mv.visitVarInsn(ASTORE, 5);
+
+            //we finished to try to access currentCarrierThread and it went fine, we jump to the next thing to do
+            mv.visitLabel(L1);
+            mv.visitJumpInsn(GOTO, testHashMap);
+
+            //to handle the exception we merely store it in 7
+            mv.visitLabel(L2);
+            mv.visitLabel(LError);
+            mv.visitVarInsn(ASTORE, 6);
+            mv.visitInsn(ACONST_NULL);
+            mv.visitInsn(ARETURN);
+
+            //we try to access the currentHashmap
+            mv.visitLabel(testHashMap);
+            mv.visitInsn(ACONST_NULL);
+            mv.visitTypeInsn(CHECKCAST, "io/netty/buffer/PoolThreadCache");
+            mv.visitVarInsn(ASTORE, 3);
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator", "threadCaches",
+                    "Ljava/util/concurrent/ConcurrentHashMap;");
+            //we store the testHashMap
+            mv.visitTypeInsn(CHECKCAST, "java/util/concurrent/ConcurrentHashMap");
+            mv.visitVarInsn(ASTORE, 7);
+            mv.visitVarInsn(ALOAD, 7);
+            mv.visitVarInsn(ALOAD, 5);
+            //... currentCarrierThread.getName()
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/util/concurrent/ConcurrentHashMap", "containsKey",
+                    "(Ljava/lang/Object;)Z", false);
+            mv.visitJumpInsn(IFEQ, LKeyOut);
+
+            //the carrier name is already a key in the concurrentHashMap
+            mv.visitLabel(LKeyIn);
+            mv.visitVarInsn(ALOAD, 7);
+            mv.visitVarInsn(ALOAD, 5);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/util/concurrent/ConcurrentHashMap", "get",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+            mv.visitTypeInsn(CHECKCAST, "io/netty/buffer/PoolThreadCache");
+            mv.visitInsn(ARETURN);
+
+            //the carrier name is not already a key in the concurrentHashMap
+            mv.visitLabel(LKeyOut);
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitFieldInsn(GETFIELD, "io/netty/buffer/PooledByteBufAllocator", "heapArenas",
+                    "[Lio/netty/buffer/PoolArena;");
+            mv.visitMethodInsn(INVOKESPECIAL, "io/netty/buffer/PooledByteBufAllocator", "leastUsedArena",
+                    "([Lio/netty/buffer/PoolArena;)Lio/netty/buffer/PoolArena;", false);
+            mv.visitVarInsn(ASTORE, 6);
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitFieldInsn(GETFIELD, "io/netty/buffer/PooledByteBufAllocator", "directArenas",
+                    "[Lio/netty/buffer/PoolArena;");
+            mv.visitMethodInsn(INVOKESPECIAL, "io/netty/buffer/PooledByteBufAllocator", "leastUsedArena",
+                    "([Lio/netty/buffer/PoolArena;)Lio/netty/buffer/PoolArena;", false);
+            mv.visitVarInsn(ASTORE, 9);
+            mv.visitTypeInsn(NEW, "io/netty/buffer/PoolThreadCache");
+
+            mv.visitInsn(DUP);
+            mv.visitVarInsn(ALOAD, 6);
+            mv.visitVarInsn(ALOAD, 9);
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitFieldInsn(GETFIELD, "io/netty/buffer/PooledByteBufAllocator", "smallCacheSize",
+                    "I");
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitFieldInsn(GETFIELD, "io/netty/buffer/PooledByteBufAllocator", "normalCacheSize",
+                    "I");
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                    "DEFAULT_MAX_CACHED_BUFFER_CAPACITY", "I");
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                    "DEFAULT_CACHE_TRIM_INTERVAL", "I");
+            mv.visitMethodInsn(INVOKESPECIAL, "io/netty/buffer/PoolThreadCache", "<init>",
+                    "(Lio/netty/buffer/PoolArena;Lio/netty/buffer/PoolArena;IIII)V", false);
+            mv.visitVarInsn(ASTORE, 3);
+            mv.visitVarInsn(ALOAD, 7);
+            mv.visitVarInsn(ALOAD, 5);
+            mv.visitVarInsn(ALOAD, 3);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/util/concurrent/ConcurrentHashMap", "put",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", false);
+
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                    "DEFAULT_CACHE_TRIM_INTERVAL_MILLIS", "J");
+            mv.visitInsn(LCONST_0);
+            mv.visitInsn(LCMP);
+            mv.visitJumpInsn(IFLE, L14);
+
+            mv.visitLabel(new Label());
+            mv.visitMethodInsn(INVOKESTATIC, "io/netty/util/internal/ThreadExecutorMap", "currentExecutor",
+                    "()Lio/netty/util/concurrent/EventExecutor;", false);
+            mv.visitVarInsn(ASTORE, 10);
+            mv.visitVarInsn(ALOAD, 10);
+            mv.visitJumpInsn(IFNULL, L14);
+            mv.visitVarInsn(ALOAD, 10);
+            mv.visitVarInsn(ALOAD, 0);
+
+            mv.visitFieldInsn(GETFIELD, "io/netty/buffer/PooledByteBufAllocator", "trimTask",
+                    "Ljava/lang/Runnable;");
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                    "DEFAULT_CACHE_TRIM_INTERVAL_MILLIS", "J");
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator",
+                    "DEFAULT_CACHE_TRIM_INTERVAL_MILLIS", "J");
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator", "MILLISECONDS",
+                    "Ljava/util/concurrent/TimeUnit;");
+            mv.visitMethodInsn(INVOKEINTERFACE, "io/netty/util/concurrent/EventExecutor",
+                    "scheduleAtFixedRate",
+                    "(Ljava/lang/Runnable;JJLjava/util/concurrent/TimeUnit;)Lio/netty/util/concurrent/ScheduledFuture;",
+                    true);
+            mv.visitInsn(POP);
+
+            mv.visitLabel(L14);
+            mv.visitVarInsn(ALOAD, 3);
+            mv.visitInsn(ARETURN);
+            mv.visitLabel(LEnd);
+
+            mv.visitTryCatchBlock(L0, L1, L2, "java/lang/NoSuchMethodException");
+            mv.visitTryCatchBlock(L0, L1, L2, "java/lang/ClassNotFoundException");
+            mv.visitTryCatchBlock(L0, L1, L2, "java/lang/reflect/InvocationTargetException");
+            mv.visitTryCatchBlock(L0, L1, L2, "java/lang/IllegalAccessException");
+
+            mv.visitLocalVariable("cache", "Lio/netty/buffer/PoolThreadCache;", null, testHashMap, LEnd, 3);
+            mv.visitLocalVariable("this", "Lio/netty/buffer/PooledByteBufAllocator;", null, LStart, LEnd, 0);
+            mv.visitLocalVariable("initialCapacity", "I", null, LStart, LEnd, 1);
+            mv.visitLocalVariable("maxCapacity", "I", null, LStart, LEnd, 2);
+            mv.visitLocalVariable("method", "Ljava/lang/reflect/Method;", null, L0, LEnd, 4);
+            mv.visitLocalVariable("currentCarrierThread", "Ljava/lang/Thread;", null, LStart, LEnd, 5);
+            mv.visitLocalVariable("e", "Ljava/lang/ReflectiveOperationException;", null,
+                    LError, testHashMap, 6);
+            mv.visitLocalVariable("lthreadCaches", "Ljava/util/concurrent/ConcurrentHashMap;",
+                    "Ljava/util/concurrent/ConcurrentHashMap<Ljava/lang/Thread;Lio/netty/buffer/PoolThreadCache;>;",
+                    testHashMap, LEnd, 7);
+            mv.visitLocalVariable("heapArena", "Lio/netty/buffer/PoolArena;",
+                    "Lio/netty/buffer/PoolArena<[B>;", LKeyOut, LEnd, 6);
+            mv.visitLocalVariable("directArena", "Lio/netty/buffer/PoolArena;",
+                    "Lio/netty/buffer/PoolArena<[B>;", LKeyOut, LEnd, 9);
+
+            mv.visitMaxs(5, 10);
+        }
+
+        @Override
+        public void visitEnd() {
+            cv.visitField(ACC_STATIC | ACC_PRIVATE, "isVirtualHandle",
+                    "Ljava/lang/invoke/MethodHandle;",
+                    null,
+                    null);
+            cv.visitField(ACC_STATIC | ACC_PRIVATE, "getCurrentCarrierHandle",
+                    "Ljava/lang/invoke/MethodHandle;",
+                    null,
+                    null);
+            cv.visitField(ACC_STATIC | ACC_PRIVATE, "canUseVirtual",
+                    "Ljava/lang/Boolean;",
+                    null,
+                    null);
+            cv.visitField(ACC_STATIC | ACC_PRIVATE, "threadCaches",
+                    "Ljava/util/concurrent/ConcurrentHashMap;",
+                    "Ljava/util/concurrent/ConcurrentHashMapConcurrentHashMap<Ljava/lang/Thread;Lio/netty/buffer/PoolThreadCache;>;",
+                    null);
+
+            if (cv != null) {
+                createLeastUsedArenaMethod();
+                createCacheMethod();
+                cv.visitEnd();
+            }
         }
     }
 
@@ -652,13 +952,13 @@ public class NettyLoomAdaptorProcessor {
             mv.visitJumpInsn(IFEQ, lTestCache);
 
             mv.visitLabel(L0);
-            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator", "isVirtualMethod",
+            mv.visitFieldInsn(GETSTATIC, "io/netty/buffer/PooledByteBufAllocator", "isVirtualHandle",
                     "Ljava/lang/reflect/Method;");
             mv.visitMethodInsn(INVOKESTATIC, "java/lang/Thread", "currentThread",
                     "()Ljava/lang/Thread;", false);
             mv.visitInsn(ICONST_0);
             mv.visitTypeInsn(ANEWARRAY, "java/lang/Object");
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/reflect/Method", "invoke",
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/reflect/Method", "invokeExact",
                     "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", false);
 
             mv.visitTypeInsn(CHECKCAST, "java/lang/Boolean");
