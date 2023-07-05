@@ -1,10 +1,15 @@
 package io.quarkus.smallrye.reactivemessaging.runtime;
 
+import java.lang.reflect.InvocationTargetException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.function.Supplier;
 
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -22,6 +27,8 @@ import io.smallrye.reactive.messaging.annotations.Blocking;
 import io.smallrye.reactive.messaging.providers.connectors.ExecutionHolder;
 import io.smallrye.reactive.messaging.providers.connectors.WorkerPoolRegistry;
 import io.smallrye.reactive.messaging.providers.helpers.Validation;
+import io.vertx.core.Vertx;
+import io.vertx.core.impl.ContextInternal;
 import io.vertx.mutiny.core.Context;
 import io.vertx.mutiny.core.WorkerExecutor;
 
@@ -32,12 +39,66 @@ import io.vertx.mutiny.core.WorkerExecutor;
 public class QuarkusWorkerPoolRegistry extends WorkerPoolRegistry {
     private static final String WORKER_CONFIG_PREFIX = "smallrye.messaging.worker";
     private static final String WORKER_CONCURRENCY = "max-concurrency";
+    public static final String DEFAULT_VIRTUAL_THREAD_WORKER = "<virtual-thread>";
+    public static final int DEFAULT_VIRTUAL_THREAD_MAX_CONCURRENCY = 5000;
 
     @Inject
     ExecutionHolder executionHolder;
 
+    private final Map<String, Semaphore> virtualThreadConcurrency = new ConcurrentHashMap<>();
+
     private final Map<String, Integer> workerConcurrency = new HashMap<>();
     private final Map<String, WorkerExecutor> workerExecutors = new ConcurrentHashMap<>();
+
+    public static final Supplier<Executor> VIRTUAL_EXECUTOR_SUPPLIER = new Supplier<Executor>() {
+        volatile Executor current = null;
+
+        /**
+         * This method uses reflection in order to allow developers to quickly test quarkus-loom without needing to
+         * change --release, --source, --target flags and to enable previews.
+         * Since we try to load the "Loom-preview" classes/methods at runtime, the application can even be compiled
+         * using java 11 and executed with a loom-compliant JDK.
+         */
+        @Override
+        public Executor get() {
+            if (current == null) {
+                try {
+                    var virtual = (Executor) Executors.class.getMethod("newVirtualThreadPerTaskExecutor")
+                            .invoke(this);
+                    current = new Executor() {
+                        @Override
+                        public void execute(Runnable command) {
+                            var context = Vertx.currentContext();
+                            if (!(context instanceof ContextInternal)) {
+                                virtual.execute(command);
+                            } else {
+                                virtual.execute(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        final var previousContext = ((ContextInternal) context).beginDispatch();
+                                        try {
+                                            command.run();
+                                        } finally {
+                                            ((ContextInternal) context).endDispatch(previousContext);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    };
+                } catch (InvocationTargetException | IllegalAccessException | NoSuchMethodException e) {
+                    System.err.println(e);
+                    //quite ugly but works
+                    //                    logger.warnf("You weren't able to create an executor that spawns virtual threads, the default" +
+                    //                            " blocking executor will be used, please check that your JDK is compatible with " +
+                    //                            "virtual threads");
+                    //if for some reason a class/method can't be loaded or invoked we return the traditional EXECUTOR
+                    //                    current = EXECUTOR_SUPPLIER.get();
+                }
+            }
+            return current;
+        }
+    };
 
     public void terminate(
             @Observes(notifyObserver = Reception.IF_EXISTS) @Priority(100) @BeforeDestroyed(ApplicationScoped.class) Object event) {
@@ -56,6 +117,24 @@ public class QuarkusWorkerPoolRegistry extends WorkerPoolRegistry {
                 return currentContext.executeBlocking(Uni.createFrom().deferred(() -> uni), ordered);
             }
             return executionHolder.vertx().executeBlocking(uni, ordered);
+        } else if (virtualThreadConcurrency.containsKey(workerName)) {
+            Semaphore semaphore = virtualThreadConcurrency.get(workerName);
+            boolean acquired = semaphore.tryAcquire();
+            if (acquired) {
+                return runOnVirtualThread(currentContext, uni, semaphore);
+            } else {
+                if (currentContext != null) {
+                    return currentContext.executeBlocking(Uni.createFrom().deferred(() -> {
+                        semaphore.acquireUninterruptibly();
+                        return runOnVirtualThread(currentContext, uni, semaphore);
+                    }));
+                } else {
+                    return executionHolder.vertx().executeBlocking(Uni.createFrom().deferred(() -> {
+                        semaphore.acquireUninterruptibly();
+                        return runOnVirtualThread(currentContext, uni, semaphore);
+                    }));
+                }
+            }
         } else {
             if (currentContext != null) {
                 return getWorker(workerName).executeBlocking(uni, ordered)
@@ -71,6 +150,20 @@ public class QuarkusWorkerPoolRegistry extends WorkerPoolRegistry {
             }
             return getWorker(workerName).executeBlocking(uni, ordered);
         }
+    }
+
+    private <T> Uni<T> runOnVirtualThread(Context currentContext, Uni<T> uni, Semaphore semaphore) {
+        return uni.runSubscriptionOn(command -> VIRTUAL_EXECUTOR_SUPPLIER.get().execute(command))
+                .onItemOrFailure().transformToUni((item, failure) -> {
+                    semaphore.release();
+                    return Uni.createFrom().emitter(emitter -> {
+                        if (failure != null) {
+                            currentContext.runOnContext(() -> emitter.fail(failure));
+                        } else {
+                            currentContext.runOnContext(() -> emitter.complete(item));
+                        }
+                    });
+                });
     }
 
     public WorkerExecutor getWorker(String workerName) {
@@ -102,10 +195,10 @@ public class QuarkusWorkerPoolRegistry extends WorkerPoolRegistry {
         }
 
         // Shouldn't get here
-        throw new IllegalArgumentException("@Blocking referred to invalid worker name.");
+        throw new IllegalArgumentException("@Blocking referred to invalid worker name. " + workerName);
     }
 
-    public void defineWorker(String className, String method, String poolName) {
+    public void defineWorker(String className, String method, String poolName, boolean virtualThread) {
         Objects.requireNonNull(className, "className was empty");
         Objects.requireNonNull(method, "Method was empty");
 
@@ -118,11 +211,17 @@ public class QuarkusWorkerPoolRegistry extends WorkerPoolRegistry {
             // Validate @Blocking worker pool has configuration to define concurrency
             String workerConfigKey = WORKER_CONFIG_PREFIX + "." + poolName + "." + WORKER_CONCURRENCY;
             Optional<Integer> concurrency = ConfigProvider.getConfig().getOptionalValue(workerConfigKey, Integer.class);
-            if (!concurrency.isPresent()) {
-                throw getBlockingError(className, method, workerConfigKey + " was not defined");
-            }
+            //
+            if (virtualThread) {
+                virtualThreadConcurrency.put(poolName,
+                        new Semaphore(concurrency.orElse(DEFAULT_VIRTUAL_THREAD_MAX_CONCURRENCY)));
+            } else {
+                if (!concurrency.isPresent()) {
+                    throw getBlockingError(className, method, workerConfigKey + " was not defined");
+                }
 
-            workerConcurrency.put(poolName, concurrency.get());
+                workerConcurrency.put(poolName, concurrency.get());
+            }
         }
     }
 
