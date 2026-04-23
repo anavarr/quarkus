@@ -3,6 +3,7 @@ package io.quarkus.test.vertx;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
@@ -16,7 +17,6 @@ import io.quarkus.vertx.core.runtime.context.VertxContextSafetyToggle;
 import io.smallrye.common.vertx.VertxContext;
 import io.vertx.core.Context;
 import io.vertx.core.Handler;
-import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 
 public class RunOnVertxContextTestMethodInvoker implements TestMethodInvoker {
@@ -103,7 +103,7 @@ public class RunOnVertxContextTestMethodInvoker implements TestMethodInvoker {
                     actualTestMethodArgs, uniAsserter, cf);
             context.runOnContext(handler);
         } else {
-            var handler = new RunTestMethodOnVertxBlockingContextHandler(actualTestInstance, actualTestMethod,
+            var handler = new RunTestMethodOnVertxBlockingContextHandlerCallable(actualTestInstance, actualTestMethod,
                     actualTestMethodArgs, uniAsserter);
             cf = ((CompletableFuture<Object>) context.executeBlocking(handler).toCompletionStage());
         }
@@ -212,7 +212,7 @@ public class RunOnVertxContextTestMethodInvoker implements TestMethodInvoker {
         }
     }
 
-    public static class RunTestMethodOnVertxBlockingContextHandler implements Handler<Promise<Object>> {
+    public static class RunTestMethodOnVertxBlockingContextHandlerCallable implements Callable<Object> {
         private static final Runnable DO_NOTHING = () -> {
         };
 
@@ -221,7 +221,8 @@ public class RunOnVertxContextTestMethodInvoker implements TestMethodInvoker {
         private final List<Object> methodArgs;
         private final UnwrappableUniAsserter uniAsserter;
 
-        public RunTestMethodOnVertxBlockingContextHandler(Object testInstance, Method targetMethod, List<Object> methodArgs,
+        public RunTestMethodOnVertxBlockingContextHandlerCallable(Object testInstance, Method targetMethod,
+                List<Object> methodArgs,
                 UniAsserter uniAsserter) {
             this.testInstance = testInstance;
             this.targetMethod = targetMethod;
@@ -230,13 +231,13 @@ public class RunOnVertxContextTestMethodInvoker implements TestMethodInvoker {
         }
 
         @Override
-        public void handle(Promise<Object> promise) {
+        public Object call() throws Exception {
             ManagedContext requestContext = Arc.container().requestContext();
             if (requestContext.isActive()) {
-                doRun(promise, DO_NOTHING);
+                return doRun(DO_NOTHING);
             } else {
                 requestContext.activate();
-                doRun(promise, new Runnable() {
+                return doRun(new Runnable() {
                     @Override
                     public void run() {
                         requestContext.terminate();
@@ -245,32 +246,35 @@ public class RunOnVertxContextTestMethodInvoker implements TestMethodInvoker {
             }
         }
 
-        private void doRun(Promise<Object> promise, Runnable onTerminate) {
+        private Object doRun(Runnable onTerminate) throws Exception {
             try {
                 Object testMethodResult = targetMethod.invoke(testInstance, methodArgs.toArray(new Object[0]));
                 if (uniAsserter != null) {
+                    CompletableFuture<Object> cf = new CompletableFuture<>();
                     uniAsserter.asUni().subscribe().with(new Consumer<Object>() {
                         @Override
                         public void accept(Object o) {
                             onTerminate.run();
-                            promise.complete();
+                            cf.complete(null);
                         }
                     }, new Consumer<>() {
                         @Override
                         public void accept(Throwable t) {
                             onTerminate.run();
-                            promise.fail(t);
+                            cf.completeExceptionally(t);
                         }
                     });
+                    cf.get();
+                    return testMethodResult;
                 } else {
                     onTerminate.run();
-                    promise.complete(testMethodResult);
+                    return testMethodResult;
                 }
             } catch (Throwable t) {
                 onTerminate.run();
-                promise.fail(t.getCause());
+                throw t;
             }
         }
-    }
 
+    }
 }
