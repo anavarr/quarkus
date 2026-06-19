@@ -66,6 +66,23 @@ class GrpcLoadBalancerProviderTest {
     }
 
     @Test
+    void shutsDownSubchannelWhenEndpointChangesForSameServiceInstance() {
+        LoadBalancer.Helper helper = mock(LoadBalancer.Helper.class);
+        List<LoadBalancer.SubchannelStateListener> listeners = new ArrayList<>();
+        LoadBalancer.Subchannel first = subchannel(listeners);
+        LoadBalancer.Subchannel second = subchannel(listeners);
+        when(helper.createSubchannel(any())).thenReturn(first, second);
+
+        LoadBalancer loadBalancer = new GrpcLoadBalancerProvider(true).newLoadBalancer(helper);
+        loadBalancer.handleResolvedAddresses(resolvedAddresses(addressGroup(instance(1, 9001), 9001)));
+        loadBalancer.handleResolvedAddresses(resolvedAddresses(addressGroup(instance(1, 9002), 9002)));
+
+        verify(helper, times(2)).createSubchannel(any());
+        verify(first).shutdown();
+        verify(second, never()).shutdown();
+    }
+
+    @Test
     void shutdownClosesManagedSubchannels() {
         LoadBalancer.Helper helper = mock(LoadBalancer.Helper.class);
         List<LoadBalancer.SubchannelStateListener> listeners = new ArrayList<>();
@@ -208,6 +225,26 @@ class GrpcLoadBalancerProviderTest {
         clearInvocations(helper);
 
         removedListener.onSubchannelState(ConnectivityStateInfo.forNonError(ConnectivityState.READY));
+
+        verify(helper, never()).updateBalancingState(any(), any());
+        verify(helper, never()).refreshNameResolution();
+    }
+
+    @Test
+    void ignoresTransientFailureFromRemovedSubchannel() {
+        LoadBalancer.Helper helper = mock(LoadBalancer.Helper.class);
+        List<LoadBalancer.SubchannelStateListener> listeners = new ArrayList<>();
+        LoadBalancer.Subchannel first = subchannel(listeners);
+        LoadBalancer.Subchannel second = subchannel(listeners);
+        when(helper.createSubchannel(any())).thenReturn(first, second);
+
+        LoadBalancer loadBalancer = new GrpcLoadBalancerProvider(true).newLoadBalancer(helper);
+        loadBalancer.handleResolvedAddresses(resolvedAddresses(addressGroup(instance(1, 9001), 9001)));
+        LoadBalancer.SubchannelStateListener removedListener = listeners.get(0);
+        loadBalancer.handleResolvedAddresses(resolvedAddresses(addressGroup(instance(2, 9002), 9002)));
+        clearInvocations(helper);
+
+        removedListener.onSubchannelState(ConnectivityStateInfo.forTransientFailure(Status.UNAVAILABLE));
 
         verify(helper, never()).updateBalancingState(any(), any());
         verify(helper, never()).refreshNameResolution();
