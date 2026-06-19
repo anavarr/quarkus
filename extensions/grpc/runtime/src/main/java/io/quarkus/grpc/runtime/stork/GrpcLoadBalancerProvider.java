@@ -86,7 +86,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
             String serviceName;
 
             @Override
-            public synchronized void handleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
+            public void handleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
                 List<EquivalentAddressGroup> addresses = resolvedAddresses.getAddresses();
 
                 Object loadBalancerConfig = resolvedAddresses.getLoadBalancingPolicyConfig();
@@ -129,7 +129,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
             }
 
             @Override
-            public synchronized void handleNameResolutionError(Status error) {
+            public void handleNameResolutionError(Status error) {
                 log.errorf("Name resolution failed for service '%s'", serviceName);
                 if (activeServiceInstances.isEmpty()) {
                     helper.updateBalancingState(TRANSIENT_FAILURE, new GrpcLoadBalancerProvider.ErrorPicker(error));
@@ -137,7 +137,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
             }
 
             @Override
-            public synchronized void shutdown() {
+            public void shutdown() {
                 log.debugf("Shutting down load balancer for service '%s'", serviceName);
                 for (ManagedSubchannel managedSubchannel : subchannelsByEndpoint.values()) {
                     managedSubchannel.shutdown();
@@ -169,7 +169,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                 return managedSubchannel;
             }
 
-            private synchronized void handleSubchannelState(ManagedSubchannel managedSubchannel,
+            private void handleSubchannelState(ManagedSubchannel managedSubchannel,
                     ConnectivityStateInfo stateInfo, LoadBalancer.Helper helper) {
                 if (subchannelsByEndpoint.get(managedSubchannel.endpointKey) != managedSubchannel) {
                     return;
