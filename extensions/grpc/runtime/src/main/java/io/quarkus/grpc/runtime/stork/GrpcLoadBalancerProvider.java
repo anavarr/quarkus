@@ -78,12 +78,13 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
     public LoadBalancer newLoadBalancer(LoadBalancer.Helper helper) {
         return new LoadBalancer() {
 
-            final Map<AddressesKey, Subchannel> subchannelsByEndpoint = new HashMap<>();
+            final Map<AddressesKey, Subchannel> subchannelsByAddresses = new HashMap<>();
             final Map<AddressesKey, ServiceInstance> serviceInstanceByEndpoint = new HashMap<>();
             final Map<AddressesKey, ConnectivityState> stateByEndpoint = new HashMap<>();
             final Map<ServiceInstance, Subchannel> subChannels = new TreeMap<>(
                     Comparator.comparingLong(ServiceInstance::getId));
             final Set<ServiceInstance> activeSubchannels = new HashSet<>();
+            Status lastFailureStatus = Status.UNAVAILABLE;
 
             String serviceName;
 
@@ -115,7 +116,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                     AddressesKey endpointKey = AddressesKey.from(addressGroup);
                     desiredEndpoints.add(endpointKey);
 
-                    Subchannel existing = subchannelsByEndpoint.get(endpointKey);
+                    Subchannel existing = subchannelsByAddresses.get(endpointKey);
                     if (existing != null) {
                         ServiceInstance old = serviceInstanceByEndpoint.put(endpointKey, serviceInstance);
                         if (old != null) {
@@ -124,11 +125,10 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                                 activeSubchannels.add(serviceInstance);
                             }
                         }
-                        existing.updateAddresses(List.of(addressGroup));
                         desiredSubChannels.put(serviceInstance, existing);
                     } else {
                         Subchannel subchannel = createSubchannel(endpointKey, addressGroup, serviceInstance);
-                        subchannelsByEndpoint.put(endpointKey, subchannel);
+                        subchannelsByAddresses.put(endpointKey, subchannel);
                         serviceInstanceByEndpoint.put(endpointKey, serviceInstance);
                         stateByEndpoint.put(endpointKey, ConnectivityState.CONNECTING);
                         desiredSubChannels.put(serviceInstance, subchannel);
@@ -136,13 +136,13 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                 }
 
                 List<AddressesKey> removed = new ArrayList<>();
-                for (AddressesKey key : subchannelsByEndpoint.keySet()) {
+                for (AddressesKey key : subchannelsByAddresses.keySet()) {
                     if (!desiredEndpoints.contains(key)) {
                         removed.add(key);
                     }
                 }
                 for (AddressesKey key : removed) {
-                    Subchannel sub = subchannelsByEndpoint.remove(key);
+                    Subchannel sub = subchannelsByAddresses.remove(key);
                     ServiceInstance si = serviceInstanceByEndpoint.remove(key);
                     stateByEndpoint.remove(key);
                     if (si != null) {
@@ -169,7 +169,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                 subchannel.start(new SubchannelStateListener() {
                     @Override
                     public void onSubchannelState(ConnectivityStateInfo stateInfo) {
-                        if (subchannelsByEndpoint.get(endpointKey) != subchannel) {
+                        if (subchannelsByAddresses.get(endpointKey) != subchannel) {
                             return;
                         }
                         if (stateInfo.getState() == ConnectivityState.SHUTDOWN) {
@@ -191,8 +191,10 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                         }
 
                         if (newState == TRANSIENT_FAILURE) {
-                            Status status = stateInfo.getStatus();
-                            log.error("gRPC Sub Channel failed", status == null ? null : status.getCause());
+                            lastFailureStatus = stateInfo.getStatus() != null
+                                    ? stateInfo.getStatus()
+                                    : Status.UNAVAILABLE;
+                            log.error("gRPC Sub Channel failed", lastFailureStatus.getCause());
                             helper.refreshNameResolution();
                         } else if (newState == IDLE) {
                             helper.refreshNameResolution();
@@ -225,10 +227,10 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
             @Override
             public void shutdown() {
                 log.debugf("Shutting down load balancer for service '%s'", serviceName);
-                for (Subchannel subchannel : subchannelsByEndpoint.values()) {
+                for (Subchannel subchannel : subchannelsByAddresses.values()) {
                     subchannel.shutdown();
                 }
-                subchannelsByEndpoint.clear();
+                subchannelsByAddresses.clear();
                 serviceInstanceByEndpoint.clear();
                 stateByEndpoint.clear();
                 subChannels.clear();
@@ -258,7 +260,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                 }
 
                 if (aggregateState == TRANSIENT_FAILURE) {
-                    helper.updateBalancingState(aggregateState, new GrpcLoadBalancerProvider.ErrorPicker(Status.UNAVAILABLE));
+                    helper.updateBalancingState(aggregateState, new GrpcLoadBalancerProvider.ErrorPicker(lastFailureStatus));
                 } else {
                     Map<ServiceInstance, Subchannel> copy = new TreeMap<>(
                             Comparator.comparingLong(ServiceInstance::getId));

@@ -43,7 +43,6 @@ class GrpcLoadBalancerProviderTest {
         loadBalancer.handleResolvedAddresses(resolvedAddresses(addressGroup(instance(2, 9001), 9001)));
 
         verify(helper, times(1)).createSubchannel(any());
-        verify(subchannel).updateAddresses(any());
         verify(subchannel, never()).shutdown();
     }
 
