@@ -78,7 +78,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
     public LoadBalancer newLoadBalancer(LoadBalancer.Helper helper) {
         return new LoadBalancer() {
 
-            final Map<EndpointKey, ManagedSubchannel> subchannelsByEndpoint = new LinkedHashMap<>();
+            final Map<AddressKey, ManagedSubchannel> subchannelsByAddress = new LinkedHashMap<>();
             final Map<ServiceInstance, Subchannel> subchannelsByServiceInstance = new TreeMap<>(
                     Comparator.comparingLong(ServiceInstance::getId));
             final Set<ServiceInstance> activeServiceInstances = new HashSet<>();
@@ -98,7 +98,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
 
                 serviceName = config.serviceName;
 
-                Map<EndpointKey, EquivalentAddressGroup> desiredEndpoints = new LinkedHashMap<>();
+                Map<AddressKey, EquivalentAddressGroup> desiredAddresses = new LinkedHashMap<>();
                 Map<ServiceInstance, Subchannel> desiredSubchannelsByServiceInstance = new TreeMap<>(
                         Comparator.comparingLong(ServiceInstance::getId));
 
@@ -109,19 +109,19 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                         log.warn("Ignoring gRPC Stork address group without a service instance");
                         continue;
                     }
-                    EndpointKey endpointKey = EndpointKey.from(addressGroup);
-                    desiredEndpoints.put(endpointKey, addressGroup);
-                    ManagedSubchannel managedSubchannel = subchannelsByEndpoint.get(endpointKey);
+                    AddressKey addressKey = AddressKey.from(addressGroup);
+                    desiredAddresses.put(addressKey, addressGroup);
+                    ManagedSubchannel managedSubchannel = subchannelsByAddress.get(addressKey);
                     if (managedSubchannel == null) {
-                        managedSubchannel = createManagedSubchannel(endpointKey, addressGroup, serviceInstance, helper);
-                        subchannelsByEndpoint.put(endpointKey, managedSubchannel);
+                        managedSubchannel = createManagedSubchannel(addressKey, addressGroup, serviceInstance, helper);
+                        subchannelsByAddress.put(addressKey, managedSubchannel);
                     } else {
                         managedSubchannel.update(addressGroup, serviceInstance);
                     }
                     desiredSubchannelsByServiceInstance.put(serviceInstance, managedSubchannel.subchannel);
                 }
 
-                shutdownRemovedSubchannels(desiredEndpoints.keySet());
+                shutdownRemovedSubchannels(desiredAddresses.keySet());
                 subchannelsByServiceInstance.clear();
                 subchannelsByServiceInstance.putAll(desiredSubchannelsByServiceInstance);
                 rebuildActiveServiceInstances();
@@ -139,15 +139,15 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
             @Override
             public void shutdown() {
                 log.debugf("Shutting down load balancer for service '%s'", serviceName);
-                for (ManagedSubchannel managedSubchannel : subchannelsByEndpoint.values()) {
+                for (ManagedSubchannel managedSubchannel : subchannelsByAddress.values()) {
                     managedSubchannel.shutdown();
                 }
-                subchannelsByEndpoint.clear();
+                subchannelsByAddress.clear();
                 subchannelsByServiceInstance.clear();
                 activeServiceInstances.clear();
             }
 
-            private ManagedSubchannel createManagedSubchannel(EndpointKey endpointKey, EquivalentAddressGroup addressGroup,
+            private ManagedSubchannel createManagedSubchannel(AddressKey addressKey, EquivalentAddressGroup addressGroup,
                     ServiceInstance serviceInstance, LoadBalancer.Helper helper) {
                 CreateSubchannelArgs subChannelArgs = CreateSubchannelArgs.newBuilder()
                         .setAddresses(addressGroup)
@@ -155,7 +155,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                         .build();
 
                 Subchannel subchannel = helper.createSubchannel(subChannelArgs);
-                ManagedSubchannel managedSubchannel = new ManagedSubchannel(endpointKey, subchannel, addressGroup,
+                ManagedSubchannel managedSubchannel = new ManagedSubchannel(addressKey, subchannel, addressGroup,
                         serviceInstance);
                 subchannel.start(new SubchannelStateListener() {
                     @Override
@@ -171,7 +171,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
 
             private void handleSubchannelState(ManagedSubchannel managedSubchannel,
                     ConnectivityStateInfo stateInfo, LoadBalancer.Helper helper) {
-                if (subchannelsByEndpoint.get(managedSubchannel.endpointKey) != managedSubchannel) {
+                if (subchannelsByAddress.get(managedSubchannel.addressKey) != managedSubchannel) {
                     return;
                 }
                 if (stateInfo.getState() == ConnectivityState.SHUTDOWN) {
@@ -197,15 +197,15 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                 updateBalancingState(helper);
             }
 
-            private void shutdownRemovedSubchannels(Set<EndpointKey> desiredEndpoints) {
-                List<EndpointKey> removedEndpoints = new ArrayList<>();
-                for (EndpointKey endpointKey : subchannelsByEndpoint.keySet()) {
-                    if (!desiredEndpoints.contains(endpointKey)) {
-                        removedEndpoints.add(endpointKey);
+            private void shutdownRemovedSubchannels(Set<AddressKey> desiredAddresses) {
+                List<AddressKey> removedAddresses = new ArrayList<>();
+                for (AddressKey addressKey : subchannelsByAddress.keySet()) {
+                    if (!desiredAddresses.contains(addressKey)) {
+                        removedAddresses.add(addressKey);
                     }
                 }
-                for (EndpointKey endpointKey : removedEndpoints) {
-                    ManagedSubchannel removed = subchannelsByEndpoint.remove(endpointKey);
+                for (AddressKey addressKey : removedAddresses) {
+                    ManagedSubchannel removed = subchannelsByAddress.remove(addressKey);
                     if (removed != null) {
                         removed.shutdown();
                     }
@@ -214,7 +214,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
 
             private void rebuildActiveServiceInstances() {
                 activeServiceInstances.clear();
-                for (ManagedSubchannel managedSubchannel : subchannelsByEndpoint.values()) {
+                for (ManagedSubchannel managedSubchannel : subchannelsByAddress.values()) {
                     if (managedSubchannel.state == ConnectivityState.READY
                             && subchannelsByServiceInstance.containsKey(managedSubchannel.serviceInstance)) {
                         activeServiceInstances.add(managedSubchannel.serviceInstance);
@@ -253,7 +253,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
                 }
                 boolean connectingOrIdle = false;
                 boolean transientFailure = false;
-                for (ManagedSubchannel managedSubchannel : subchannelsByEndpoint.values()) {
+                for (ManagedSubchannel managedSubchannel : subchannelsByAddress.values()) {
                     switch (managedSubchannel.state) {
                         case CONNECTING:
                         case IDLE:
@@ -273,7 +273,7 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
             }
 
             private Status lastFailure() {
-                for (ManagedSubchannel managedSubchannel : subchannelsByEndpoint.values()) {
+                for (ManagedSubchannel managedSubchannel : subchannelsByAddress.values()) {
                     if (managedSubchannel.state == TRANSIENT_FAILURE) {
                         return managedSubchannel.status;
                     }
@@ -291,15 +291,15 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
         }
     }
 
-    static final class EndpointKey {
+    static final class AddressKey {
         private final List<SocketAddress> addresses;
 
-        private EndpointKey(List<SocketAddress> addresses) {
+        private AddressKey(List<SocketAddress> addresses) {
             this.addresses = addresses;
         }
 
-        static EndpointKey from(EquivalentAddressGroup addressGroup) {
-            return new EndpointKey(List.copyOf(addressGroup.getAddresses()));
+        static AddressKey from(EquivalentAddressGroup addressGroup) {
+            return new AddressKey(List.copyOf(addressGroup.getAddresses()));
         }
 
         @Override
@@ -307,10 +307,10 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
             if (this == o) {
                 return true;
             }
-            if (!(o instanceof EndpointKey)) {
+            if (!(o instanceof AddressKey)) {
                 return false;
             }
-            EndpointKey that = (EndpointKey) o;
+            AddressKey that = (AddressKey) o;
             return addresses.equals(that.addresses);
         }
 
@@ -321,16 +321,16 @@ public class GrpcLoadBalancerProvider extends LoadBalancerProvider {
     }
 
     static class ManagedSubchannel {
-        final EndpointKey endpointKey;
+        final AddressKey addressKey;
         final LoadBalancer.Subchannel subchannel;
         EquivalentAddressGroup addressGroup;
         ServiceInstance serviceInstance;
         ConnectivityState state = ConnectivityState.CONNECTING;
         Status status = Status.OK;
 
-        ManagedSubchannel(EndpointKey endpointKey, LoadBalancer.Subchannel subchannel,
+        ManagedSubchannel(AddressKey addressKey, LoadBalancer.Subchannel subchannel,
                 EquivalentAddressGroup addressGroup, ServiceInstance serviceInstance) {
-            this.endpointKey = endpointKey;
+            this.addressKey = addressKey;
             this.subchannel = subchannel;
             this.addressGroup = addressGroup;
             this.serviceInstance = serviceInstance;
