@@ -53,6 +53,11 @@ public class ContextCheckService extends MutinyContextCheckGrpc.ContextCheckImpl
         return slowReply();
     }
 
+    @Override
+    public Uni<CheckReply> checkSlowEventLoop(CheckRequest request) {
+        return slowReply();
+    }
+
     private static Uni<CheckReply> slowReply() {
         // Hold the call open for 2 s without blocking any thread. When the client
         // cancels (deadline), Mutiny cancels the timer subscription before it fires,

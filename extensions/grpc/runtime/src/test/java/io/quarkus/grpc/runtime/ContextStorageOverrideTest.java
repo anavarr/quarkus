@@ -30,7 +30,7 @@ class ContextStorageOverrideTest {
 
     @AfterEach
     void tearDown() throws Exception {
-        vertx.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        vertx.close().await(5, TimeUnit.SECONDS);
     }
 
     // --- Non-Vert.x (ThreadLocal fallback) tests ---

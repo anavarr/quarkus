@@ -94,4 +94,24 @@ public class GrpcContextCancelLifecycleTest {
             executor.shutdownNow();
         }
     }
+
+    @Test
+    void grpcContextIsCleanedUpAfterCancelOnEventLoop() {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            executor.submit(() -> {
+                try {
+                    stub.withDeadlineAfter(300, TimeUnit.MILLISECONDS)
+                            .checkSlowEventLoop(CheckRequest.getDefaultInstance());
+                } catch (StatusRuntimeException ignored) {
+                }
+            });
+
+            await().atMost(5, SECONDS)
+                    .alias("gRPC context must be ROOT on the duplicated context after cancel on the event-loop path")
+                    .until(() -> watcher.readContextOnDuplicatedContext().get(1, SECONDS) == io.grpc.Context.ROOT);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
 }
