@@ -1,6 +1,7 @@
 package io.quarkus.grpc.context;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import java.util.concurrent.ExecutorService;
@@ -23,7 +24,7 @@ import io.quarkus.test.QuarkusExtensionTest;
 
 /**
  * Cancellation tests for the gRPC context lifecycle, kept in a separate class so that
- * the slow handlers required to trigger onCancel() do not leave stale state that
+ * the slow handlers required to trigger cancellation do not leave stale state that
  * interferes with the close()-path tests in {@link GrpcContextLifecycleTest}.
  */
 public class GrpcContextCancelLifecycleTest {
@@ -48,14 +49,13 @@ public class GrpcContextCancelLifecycleTest {
     }
 
     // -------------------------------------------------------------------------
-    // Context cleaned up via onCancel() when the client cancels before the server responds
+    // Context cleaned up when the client cancels before the server responds
     // -------------------------------------------------------------------------
 
     @Test
     void grpcContextIsCleanedUpAfterCancelOnBlockingWorker() {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            // Issue a call with a short deadline; the server holds the call open so it gets cancelled.
             executor.submit(() -> {
                 try {
                     stub.withDeadlineAfter(300, TimeUnit.MILLISECONDS)
@@ -64,9 +64,12 @@ public class GrpcContextCancelLifecycleTest {
                 }
             });
 
-            // Poll until onCancel() cleanup has run on the duplicated context.
-            // There is no single reliable hook that fires after cleanup on all paths, so we
-            // let Awaitility drive the determinism instead of a hand-rolled latch.
+            await().atMost(5, SECONDS)
+                    .alias("Inner.onCancel() must fire on the blocking-worker path")
+                    .until(() -> watcher.getContextAtOnCancel() != null);
+            assertThat(watcher.getContextAtOnCancel())
+                    .as("gRPC context must be non-ROOT during onCancel() on the blocking-worker path")
+                    .isNotSameAs(io.grpc.Context.ROOT);
             await().atMost(5, SECONDS)
                     .alias("gRPC context must be ROOT on the duplicated context after cancel on the blocking-worker path")
                     .until(() -> watcher.readContextOnDuplicatedContext().get(1, SECONDS) == io.grpc.Context.ROOT);
@@ -87,6 +90,12 @@ public class GrpcContextCancelLifecycleTest {
                 }
             });
 
+            await().atMost(5, SECONDS)
+                    .alias("Inner.onCancel() must fire on the virtual-thread path")
+                    .until(() -> watcher.getContextAtOnCancel() != null);
+            assertThat(watcher.getContextAtOnCancel())
+                    .as("gRPC context must be non-ROOT during onCancel() on the virtual-thread path")
+                    .isNotSameAs(io.grpc.Context.ROOT);
             await().atMost(5, SECONDS)
                     .alias("gRPC context must be ROOT on the duplicated context after cancel on the virtual-thread path")
                     .until(() -> watcher.readContextOnDuplicatedContext().get(1, SECONDS) == io.grpc.Context.ROOT);
